@@ -12,7 +12,6 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 import java.time.Clock;
-import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -71,7 +70,7 @@ public class ConsumerOffsetsReader implements InitializingBean, DisposableBean {
         readerThread.start();
     }
 
-     void getAndRecordOffsets(String groupId) {
+    void getAndRecordOffsets(String groupId) {
         try {
             Map<TopicPartition, Long> endOffsets = getOffsets(groupId);
             recordOffsets(groupId, endOffsets);

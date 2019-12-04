@@ -2,18 +2,23 @@ package com.mycompany.myapp.service.lag;
 
 import org.apache.kafka.clients.admin.AdminClient;
 
+import org.apache.kafka.clients.admin.ConsumerGroupListing;
 import org.apache.kafka.clients.admin.ListConsumerGroupOffsetsResult;
+import org.apache.kafka.clients.admin.ListConsumerGroupsResult;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.testcontainers.containers.KafkaContainer;
+import org.mockito.internal.stubbing.answers.AnswersWithDelay;
+import org.mockito.internal.stubbing.answers.Returns;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -29,22 +34,10 @@ public class ConsumerOffsetsReaderTest {
     private static final String TEST_TOPIC = "test_topic";
     private static final int TEST_PARTITION = 6;
     private static final TopicPartition TEST_TOPIC_PARTITION = new TopicPartition(TEST_TOPIC, TEST_PARTITION);
-
-    private static boolean started = false;
-    private static KafkaContainer kafkaContainer;
     private Clock clock;
-
-    private void startTestcontainer() {
-        if (!started) {
-            kafkaContainer = new KafkaContainer("5.3.1").withEnv("delete.topic.enable", "true");
-            kafkaContainer.start();
-            started = true;
-        }
-    }
 
     private  ConsumerOffsetsReader offsetsReader;
     private  AdminClient adminClient;
-
 
     @BeforeEach
     void startServer() {
@@ -52,20 +45,18 @@ public class ConsumerOffsetsReaderTest {
         clock = Clock.fixed(Instant.parse("2019-01-01T00:00:00Z"), ZoneId.systemDefault());
         offsetsReader = spy(new ConsumerOffsetsReader(adminClient, clock));
     }
-
     @Test
     void getOffsets() throws InterruptedException, ExecutionException {
         ListConsumerGroupOffsetsResult mockListConsumerGroupOffsetsResults = mock(ListConsumerGroupOffsetsResult.class);
         Map<TopicPartition, OffsetAndMetadata> future = new HashMap<>();
+        Map<TopicPartition,Long> expected = new HashMap<>();
         future.put(TEST_TOPIC_PARTITION, new OffsetAndMetadata(42L));
+        expected.put(TEST_TOPIC_PARTITION, 42L);
 
         when(mockListConsumerGroupOffsetsResults.partitionsToOffsetAndMetadata())
             .thenReturn(KafkaFuture.completedFuture(future));
-
-        when(adminClient.listConsumerGroupOffsets(TEST_GROUP)).thenReturn(mockListConsumerGroupOffsetsResults);
-
-        Map<TopicPartition,Long> expected = new HashMap<>();
-        expected.put(TEST_TOPIC_PARTITION, 42L);
+        when(adminClient.listConsumerGroupOffsets(TEST_GROUP))
+            .thenReturn(mockListConsumerGroupOffsetsResults);
 
         assertThat(offsetsReader.getOffsets(TEST_GROUP)).isEqualTo(expected);
     }
@@ -74,7 +65,9 @@ public class ConsumerOffsetsReaderTest {
         @Test
         void empty() throws Exception {
             offsetsReader.recordOffsets(TEST_GROUP, new HashMap<>());
+
             OffsetPoint expected = new OffsetPoint(clock.instant(), new HashMap<>());
+
             assertThat(offsetsReader.getGroupOffsetPoints().get(TEST_GROUP).take()).isEqualTo(expected);
         }
         @Test
@@ -83,26 +76,21 @@ public class ConsumerOffsetsReaderTest {
             endOffsets.put(TEST_TOPIC_PARTITION, 42L);
 
             offsetsReader.recordOffsets(TEST_GROUP, endOffsets);
-
             OffsetPoint expected = new OffsetPoint(clock.instant(), endOffsets);
 
             assertThat(offsetsReader.getGroupOffsetPoints().get(TEST_GROUP).take()).isEqualTo(expected);
         }
-
         @Test
         void ring_buffer_full() throws Exception {
             Map<TopicPartition, Long> endOffsets = new HashMap<>();
             endOffsets.put(TEST_TOPIC_PARTITION, 42L);
-
             BlockingQueue<OffsetPoint> queue = new ArrayBlockingQueue<>(2);
-
             Map<TopicPartition, Long> offsets = new HashMap<>();
             offsets.put(TEST_TOPIC_PARTITION, 41L);
             queue.add(new OffsetPoint(clock.instant(), offsets));
             queue.add(new OffsetPoint(clock.instant(), offsets));
 
             offsetsReader.getGroupOffsetPoints().put(TEST_GROUP, queue);
-
             offsetsReader.recordOffsets(TEST_GROUP, endOffsets);
             BlockingQueue<OffsetPoint> offsetPoints = offsetsReader.getGroupOffsetPoints().get(TEST_GROUP);
 
@@ -110,11 +98,37 @@ public class ConsumerOffsetsReaderTest {
             assertThat(offsetPoints.take().getOffsets().get(TEST_TOPIC_PARTITION)).isEqualTo(42L);
         }
     }
-
     @Test
-    void getAndRecordOffsets(){
+    void getAndRecordOffsets()
+    {
+        ListConsumerGroupOffsetsResult mockListConsumerGroupOffsetsResults = mock(ListConsumerGroupOffsetsResult.class);
+        Map<TopicPartition, OffsetAndMetadata> future = new HashMap<>();
+        Map<TopicPartition, Long> endOffsets = new HashMap<>();
 
+        when(mockListConsumerGroupOffsetsResults.partitionsToOffsetAndMetadata())
+            .thenReturn(KafkaFuture.completedFuture(future));
+        when(adminClient.listConsumerGroupOffsets(TEST_GROUP))
+            .thenReturn(mockListConsumerGroupOffsetsResults);
+        offsetsReader.getAndRecordOffsets(TEST_GROUP);
 
+        verify(offsetsReader, times(1)).recordOffsets(TEST_GROUP,endOffsets);
     }
+    @Test
+    void afterPropertiesSet() throws InterruptedException {
+        ListConsumerGroupsResult mockListConsumerGroupsResults = mock(ListConsumerGroupsResult.class);
+        Collection<ConsumerGroupListing> future = new ArrayList<>();
+        ConsumerGroupListing consumerGroupListing = new ConsumerGroupListing(TEST_GROUP, true);
+        future.add(consumerGroupListing);
+        when(mockListConsumerGroupsResults.all())
+            .thenReturn(KafkaFuture.completedFuture(future));
+        when(adminClient.listConsumerGroups())
+            .thenReturn(mockListConsumerGroupsResults);
 
+        doNothing().when(offsetsReader).getAndRecordOffsets(anyString());
+
+        offsetsReader.afterPropertiesSet();
+        Thread.sleep(2000);
+
+        verify(offsetsReader, atLeastOnce()).getAndRecordOffsets(TEST_GROUP);
+    }
 }
